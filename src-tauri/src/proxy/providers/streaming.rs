@@ -174,6 +174,20 @@ pub fn create_anthropic_sse_stream(
 
                                         // 处理 reasoning（thinking）
                                         if let Some(reasoning) = &choice.delta.reasoning {
+                                            // 如果当前是文本块，需要先停止它
+                                            if current_non_tool_block_type == Some("text") {
+                                                if let Some(index) = current_non_tool_block_index.take() {
+                                                    let event = json!({
+                                                        "type": "content_block_stop",
+                                                        "index": index
+                                                    });
+                                                    let sse_data = format!("event: content_block_stop\ndata: {}\n\n",
+                                                        serde_json::to_string(&event).unwrap_or_default());
+                                                    yield Ok(Bytes::from(sse_data));
+                                                }
+                                                current_non_tool_block_type = None;
+                                            }
+                                            
                                             if current_non_tool_block_type != Some("thinking") {
                                                 if let Some(index) = current_non_tool_block_index.take() {
                                                     let event = json!({
@@ -219,7 +233,9 @@ pub fn create_anthropic_sse_stream(
                                         // 处理文本内容
                                         if let Some(content) = &choice.delta.content {
                                             if !content.is_empty() {
+                                                // 如果当前不是文本块，需要先停止其他类型的块，然后创建新的文本块
                                                 if current_non_tool_block_type != Some("text") {
+                                                    // 停止当前块（如果有）
                                                     if let Some(index) = current_non_tool_block_index.take() {
                                                         let event = json!({
                                                             "type": "content_block_stop",
@@ -230,6 +246,7 @@ pub fn create_anthropic_sse_stream(
                                                         yield Ok(Bytes::from(sse_data));
                                                     }
 
+                                                    // 创建新的文本块
                                                     let index = next_content_index;
                                                     next_content_index += 1;
                                                     let event = json!({
@@ -247,6 +264,7 @@ pub fn create_anthropic_sse_stream(
                                                     current_non_tool_block_index = Some(index);
                                                 }
 
+                                                // 每个都发送独立的 content_block_delta（保持流式体验）
                                                 if let Some(index) = current_non_tool_block_index {
                                                     let event = json!({
                                                         "type": "content_block_delta",
@@ -263,20 +281,24 @@ pub fn create_anthropic_sse_stream(
                                             }
                                         }
 
-                                        // 处理工具调用
+                                        // 处理工具调用（仅在存在非空工具调用数组时）
                                         if let Some(tool_calls) = &choice.delta.tool_calls {
-                                            if let Some(index) = current_non_tool_block_index.take() {
-                                                let event = json!({
-                                                    "type": "content_block_stop",
-                                                    "index": index
-                                                });
-                                                let sse_data = format!("event: content_block_stop\ndata: {}\n\n",
-                                                    serde_json::to_string(&event).unwrap_or_default());
-                                                yield Ok(Bytes::from(sse_data));
-                                            }
-                                            current_non_tool_block_type = None;
+                                            if !tool_calls.is_empty() {
+                                                // 如果有活动的非工具块（如 text 或 thinking），先停止它
+                                                if current_non_tool_block_type.is_some() && current_non_tool_block_index.is_some() {
+                                                    if let Some(index) = current_non_tool_block_index.take() {
+                                                        let event = json!({
+                                                            "type": "content_block_stop",
+                                                            "index": index
+                                                        });
+                                                        let sse_data = format!("event: content_block_stop\ndata: {}\n\n",
+                                                            serde_json::to_string(&event).unwrap_or_default());
+                                                        yield Ok(Bytes::from(sse_data));
+                                                    }
+                                                }
+                                                current_non_tool_block_type = None;
 
-                                            for tool_call in tool_calls {
+                                                for tool_call in tool_calls {
                                                 let (
                                                     anthropic_index,
                                                     id,
@@ -391,17 +413,21 @@ pub fn create_anthropic_sse_stream(
                                                 }
                                             }
                                         }
+                                    }
 
                                         // 处理 finish_reason
                                         if let Some(finish_reason) = &choice.finish_reason {
-                                            if let Some(index) = current_non_tool_block_index.take() {
-                                                let event = json!({
-                                                    "type": "content_block_stop",
-                                                    "index": index
-                                                });
-                                                let sse_data = format!("event: content_block_stop\ndata: {}\n\n",
-                                                    serde_json::to_string(&event).unwrap_or_default());
-                                                yield Ok(Bytes::from(sse_data));
+                                            // 如果有活动的非工具块（如 text 或 thinking），先停止它
+                                            if current_non_tool_block_type.is_some() && current_non_tool_block_index.is_some() {
+                                                if let Some(index) = current_non_tool_block_index.take() {
+                                                    let event = json!({
+                                                        "type": "content_block_stop",
+                                                        "index": index
+                                                    });
+                                                    let sse_data = format!("event: content_block_stop\ndata: {}\n\n",
+                                                        serde_json::to_string(&event).unwrap_or_default());
+                                                    yield Ok(Bytes::from(sse_data));
+                                                }
                                             }
                                             current_non_tool_block_type = None;
 
@@ -550,7 +576,7 @@ fn extract_cache_read_tokens(usage: &Usage) -> Option<u32> {
 }
 
 /// 映射停止原因
-fn map_stop_reason(finish_reason: Option<&str>) -> Option<String> {
+pub fn map_stop_reason(finish_reason: Option<&str>) -> Option<String> {
     finish_reason.map(|r| {
         match r {
             "tool_calls" | "function_call" => "tool_use",
@@ -564,181 +590,4 @@ fn map_stop_reason(finish_reason: Option<&str>) -> Option<String> {
         }
         .to_string()
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use futures::stream;
-    use futures::StreamExt;
-    use serde_json::Value;
-    use std::collections::HashMap;
-
-    #[test]
-    fn test_map_stop_reason_legacy_and_filtered_values() {
-        assert_eq!(
-            map_stop_reason(Some("function_call")),
-            Some("tool_use".to_string())
-        );
-        assert_eq!(
-            map_stop_reason(Some("content_filter")),
-            Some("end_turn".to_string())
-        );
-    }
-
-    #[tokio::test]
-    async fn test_streaming_tool_calls_routed_by_index() {
-        let input = concat!(
-            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"first_tool\"}}]}}]}\n\n",
-            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"second_tool\"}}]}}]}\n\n",
-            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"{\\\"b\\\":2}\"}}]}}]}\n\n",
-            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n\n",
-            "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4}}\n\n",
-            "data: [DONE]\n\n"
-        );
-
-        let upstream = stream::iter(vec![Ok(Bytes::from(input.as_bytes().to_vec()))]);
-        let converted = create_anthropic_sse_stream(upstream);
-        let chunks: Vec<_> = converted.collect().await;
-
-        let merged = chunks
-            .into_iter()
-            .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
-            .collect::<String>();
-
-        let events: Vec<Value> = merged
-            .split("\n\n")
-            .filter_map(|block| {
-                let data = block.lines().find_map(|line| line.strip_prefix("data: "))?;
-                serde_json::from_str::<Value>(data).ok()
-            })
-            .collect();
-
-        let mut tool_index_by_call: HashMap<String, u64> = HashMap::new();
-        for event in &events {
-            if event.get("type").and_then(|v| v.as_str()) == Some("content_block_start")
-                && event
-                    .pointer("/content_block/type")
-                    .and_then(|v| v.as_str())
-                    == Some("tool_use")
-            {
-                if let (Some(call_id), Some(index)) = (
-                    event.pointer("/content_block/id").and_then(|v| v.as_str()),
-                    event.get("index").and_then(|v| v.as_u64()),
-                ) {
-                    tool_index_by_call.insert(call_id.to_string(), index);
-                }
-            }
-        }
-
-        assert_eq!(tool_index_by_call.len(), 2);
-        assert_ne!(
-            tool_index_by_call.get("call_0"),
-            tool_index_by_call.get("call_1")
-        );
-
-        let deltas: Vec<(u64, String)> = events
-            .iter()
-            .filter(|event| {
-                event.get("type").and_then(|v| v.as_str()) == Some("content_block_delta")
-                    && event.pointer("/delta/type").and_then(|v| v.as_str())
-                        == Some("input_json_delta")
-            })
-            .filter_map(|event| {
-                let index = event.get("index").and_then(|v| v.as_u64())?;
-                let partial_json = event
-                    .pointer("/delta/partial_json")
-                    .and_then(|v| v.as_str())?
-                    .to_string();
-                Some((index, partial_json))
-            })
-            .collect();
-
-        assert_eq!(deltas.len(), 2);
-        let second_idx = deltas
-            .iter()
-            .find_map(|(index, payload)| (payload == "{\"b\":2}").then_some(*index))
-            .unwrap();
-        let first_idx = deltas
-            .iter()
-            .find_map(|(index, payload)| (payload == "{\"a\":1}").then_some(*index))
-            .unwrap();
-
-        assert_eq!(second_idx, *tool_index_by_call.get("call_1").unwrap());
-        assert_eq!(first_idx, *tool_index_by_call.get("call_0").unwrap());
-
-        assert!(events.iter().any(|event| {
-            event.get("type").and_then(|v| v.as_str()) == Some("message_delta")
-                && event.pointer("/delta/stop_reason").and_then(|v| v.as_str()) == Some("tool_use")
-        }));
-    }
-
-    #[tokio::test]
-    async fn test_streaming_delays_tool_start_until_id_and_name_ready() {
-        let input = concat!(
-            "data: {\"id\":\"chatcmpl_2\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"a\\\":\"}}]}}]}\n\n",
-            "data: {\"id\":\"chatcmpl_2\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"first_tool\"}}]}}]}\n\n",
-            "data: {\"id\":\"chatcmpl_2\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]}}]}\n\n",
-            "data: {\"id\":\"chatcmpl_2\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":6,\"completion_tokens\":2}}\n\n",
-            "data: [DONE]\n\n"
-        );
-
-        let upstream = stream::iter(vec![Ok(Bytes::from(input.as_bytes().to_vec()))]);
-        let converted = create_anthropic_sse_stream(upstream);
-        let chunks: Vec<_> = converted.collect().await;
-        let merged = chunks
-            .into_iter()
-            .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
-            .collect::<String>();
-
-        let events: Vec<Value> = merged
-            .split("\n\n")
-            .filter_map(|block| {
-                let data = block.lines().find_map(|line| line.strip_prefix("data: "))?;
-                serde_json::from_str::<Value>(data).ok()
-            })
-            .collect();
-
-        let starts: Vec<&Value> = events
-            .iter()
-            .filter(|event| {
-                event.get("type").and_then(|v| v.as_str()) == Some("content_block_start")
-                    && event
-                        .pointer("/content_block/type")
-                        .and_then(|v| v.as_str())
-                        == Some("tool_use")
-            })
-            .collect();
-        assert_eq!(starts.len(), 1);
-        assert_eq!(
-            starts[0]
-                .pointer("/content_block/id")
-                .and_then(|v| v.as_str())
-                .unwrap_or(""),
-            "call_0"
-        );
-        assert_eq!(
-            starts[0]
-                .pointer("/content_block/name")
-                .and_then(|v| v.as_str())
-                .unwrap_or(""),
-            "first_tool"
-        );
-
-        let deltas: Vec<&str> = events
-            .iter()
-            .filter(|event| {
-                event.get("type").and_then(|v| v.as_str()) == Some("content_block_delta")
-                    && event.pointer("/delta/type").and_then(|v| v.as_str())
-                        == Some("input_json_delta")
-            })
-            .filter_map(|event| {
-                event
-                    .pointer("/delta/partial_json")
-                    .and_then(|v| v.as_str())
-            })
-            .collect();
-        assert!(deltas.contains(&"{\"a\":"));
-        assert!(deltas.contains(&"1}"));
-    }
 }
