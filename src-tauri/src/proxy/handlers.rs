@@ -408,6 +408,55 @@ pub async fn handle_responses_compact(
 }
 
 // ============================================================================
+// OpenAI Models API 处理器
+// ============================================================================
+
+/// 处理 /v1/models 请求（OpenAI Models API - 直接转发）
+pub async fn handle_models(
+    State(state): State<ProxyState>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, ProxyError> {
+    // 对于 GET 请求，使用空的 JSON body
+    let empty_body = serde_json::Value::Object(serde_json::Map::new());
+
+    let mut ctx = RequestContext::new(
+        &state,
+        &empty_body,
+        &headers,
+        AppType::Codex,
+        "Codex",
+        "codex",
+    )
+    .await?;
+
+    let forwarder = ctx.create_forwarder(&state);
+    let result = match forwarder
+        .forward_with_retry(
+            &AppType::Codex,
+            "/v1/models",
+            empty_body,
+            headers,
+            ctx.get_providers(),
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(mut err) => {
+            if let Some(provider) = err.provider.take() {
+                ctx.provider = provider;
+            }
+            log_forward_error(&state, &ctx, false, &err.error);
+            return Err(err.error);
+        }
+    };
+
+    ctx.provider = result.provider;
+    let response = result.response;
+
+    process_response(response, &ctx, &state, &OPENAI_PARSER_CONFIG).await
+}
+
+// ============================================================================
 // Gemini API 处理器
 // ============================================================================
 

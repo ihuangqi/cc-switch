@@ -254,6 +254,9 @@ impl ProxyServer {
                 "/codex/v1/responses/compact",
                 post(handlers::handle_responses_compact),
             )
+            // OpenAI Models API (直接转发)
+            .route("/v1/models", get(handlers::handle_models))
+            .route("/codex/v1/models", get(handlers::handle_models))
             // Gemini API (支持带前缀和不带前缀)
             .route("/v1beta/*path", post(handlers::handle_gemini))
             .route("/gemini/v1beta/*path", post(handlers::handle_gemini))
