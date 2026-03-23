@@ -143,8 +143,7 @@ pub fn create_anthropic_sse_stream(
                                         if !has_sent_message_start {
                                             // Build usage with cache tokens if available from first chunk
                                             let mut start_usage = json!({
-                                                "input_tokens": 0,
-                                                "output_tokens": 0
+                                                "input_tokens": 0
                                             });
                                             if let Some(u) = &chunk.usage {
                                                 start_usage["input_tokens"] = json!(u.prompt_tokens);
@@ -375,7 +374,8 @@ pub fn create_anthropic_sse_stream(
                                                         "content_block": {
                                                             "type": "tool_use",
                                                             "id": id,
-                                                            "name": name
+                                                            "name": name,
+                                                            "input": {}
                                                         }
                                                     });
                                                     let sse_data = format!("event: content_block_start\ndata: {}\n\n",
@@ -471,7 +471,8 @@ pub fn create_anthropic_sse_stream(
                                                     "content_block": {
                                                         "type": "tool_use",
                                                         "id": id,
-                                                        "name": name
+                                                        "name": name,
+                                                        "input": {}
                                                     }
                                                 });
                                                 let sse_data = format!("event: content_block_start\ndata: {}\n\n",
@@ -512,17 +513,9 @@ pub fn create_anthropic_sse_stream(
                                             let stop_reason = map_stop_reason(Some(finish_reason));
                                             // Build usage with cache token fields
                                             let usage_json = chunk.usage.as_ref().map(|u| {
-                                                let mut uj = json!({
-                                                    "input_tokens": u.prompt_tokens,
+                                                json!({
                                                     "output_tokens": u.completion_tokens
-                                                });
-                                                if let Some(cached) = extract_cache_read_tokens(u) {
-                                                    uj["cache_read_input_tokens"] = json!(cached);
-                                                }
-                                                if let Some(created) = u.cache_creation_input_tokens {
-                                                    uj["cache_creation_input_tokens"] = json!(created);
-                                                }
-                                                uj
+                                                })
                                             });
                                             let event = json!({
                                                 "type": "message_delta",
